@@ -3,11 +3,13 @@
 - `docs/inventory.md`: program/data inventory, migration units, pilot choice, gotchas.
 - `harness/`: runs the original COBOL batch locally with GnuCOBOL and checks any implementation against golden output.
 - `golden/`: expected output recorded from the COBOL run.
+- `java/`: Java 21 / Spring Boot / Spring Batch / Spring Data JPA port of the pilot jobs (POSTTRAN, INTCALC).
 
 ## Prerequisites
 
 ```bash
 sudo apt-get install -y gnucobol3   # GnuCOBOL 3.1.2, BDB indexed files
+sudo apt-get install -y openjdk-21-jdk-headless maven   # Java port
 ```
 
 ## Run
@@ -28,15 +30,27 @@ The `daily-cycle` scenario follows the nightly flow: **POSTTRAN (CBTRN02C) -> IN
 - The clock is fixed at `2022-07-18 10:11:12.00` (`COB_CURRENT_DATE`), so every run produces the same bytes.
 - Each step writes its data files, `<step>.sysout` (DISPLAY output) and `<step>.rc` (return code). CBTRN02C returns 4 when there are rejects.
 
-### Plugging in the Java implementation
+### Java implementation
 
-Add `impl/java.sh` that defines `step_posttran IN OUT WORK` and `step_intcalc IN OUT WORK PARM`. The functions read and write the same text files (documented in `impl/cobol.sh`), so the Java job can run against an embedded DB and import/export fixed-width records. Then run:
+`impl/java.sh` runs the Spring Boot jar from `java/` with the same step contract. Each step starts a fresh in-memory H2 database, loads the input files through Spring Data JPA, runs the Spring Batch job, then unloads the results back to fixed-width text.
 
 ```bash
+mvn -f ../java/pom.xml package     # build + unit tests + DailyCycleParityTest
 ./run-scenario.sh daily-cycle /tmp/java-out java && ./compare.sh daily-cycle /tmp/java-out
 ```
 
-Parity holds when every data file matches byte for byte. Matching `sysout` is optional, depending on how faithful the logging needs to be.
+Parity holds when every file matches byte for byte. The Java port currently matches all of them, including `sysout` and return codes.
+
+| COBOL | Java |
+|---|---|
+| CBTRN02C (POSTTRAN) | `postTransactionsJob`: chunk step, `TransactionPostingService` |
+| CBACT04C (INTCALC) | `interestCalculationJob`: tasklet step, `InterestCalculationService` |
+| VSAM KSDS + copybook | JPA entity + `JpaRepository` (`domain/`), fixed-width codec (`layout/`) |
+| `PIC S9(n)V99` zoned decimal | `BigDecimal`, `Zoned` (overpunch codec, COBOL truncation) |
+| `FUNCTION CURRENT-DATE` | `BatchClock` (`carddemo.clock.fixed` pins it) |
+| `RETURN-CODE` 0 / 4 / abend | process exit code 0 / 4 / 16 |
+
+Known COBOL quirks are reproduced on purpose for parity (see findings 8, 9 and 12 in `docs/inventory.md`). The biggest one is that INTCALC never updates the last account.
 
 ### Regenerating golden output
 
